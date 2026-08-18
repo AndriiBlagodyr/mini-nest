@@ -14,5 +14,5 @@ export function Inject(token: symbol | string): ParameterDecorator {
 export function getInjectTokens(
   target: object,
 ): Record<number, symbol | string> {
-  return Reflect.getMetadata(INJECT_TOKEN_KEY, target) ?? {};
+  return Reflect.getOwnMetadata(INJECT_TOKEN_KEY, target) ?? {};
 }

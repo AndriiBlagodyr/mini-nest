@@ -3,14 +3,13 @@ import 'reflect-metadata';
 import { Injectable } from '../../src/decorators/injectable.js';
 
 @Injectable()
-export class A {
-  constructor(_b: unknown) {}
+export class B {
+  constructor(public a: unknown) {}
 }
 
 @Injectable()
-export class B {
-  constructor(_a: unknown) {}
+export class A {
+  constructor(public b: B) {}
 }
 
-Reflect.defineMetadata('design:paramtypes', [B], A);
 Reflect.defineMetadata('design:paramtypes', [A], B);

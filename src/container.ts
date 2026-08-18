@@ -27,6 +27,10 @@ export class Container {
       return this.providers.get(token);
     }
 
+    if (this.providers.has(token)) {
+      return this.providers.get(token);
+    }
+
     const ctor = token;
 
     if (!isInjectable(ctor)) {
