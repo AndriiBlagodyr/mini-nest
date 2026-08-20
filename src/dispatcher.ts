@@ -73,6 +73,11 @@ export class Dispatcher {
         res.end(JSON.stringify({ errors: err.errors }));
         return;
       }
+      if (err instanceof BadRequestError) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+        return;
+      }
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Internal Server Error' }));
     }
@@ -118,11 +123,15 @@ export class Dispatcher {
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf-8');
+        if (!raw) {
+          resolve(undefined);
+          return;
+        }
         try {
-          const raw = Buffer.concat(chunks).toString('utf-8');
-          resolve(raw ? JSON.parse(raw) : undefined);
-        } catch (e) {
-          reject(e);
+          resolve(JSON.parse(raw));
+        } catch {
+          reject(new BadRequestError('Invalid JSON body'));
         }
       });
       req.on('error', reject);
@@ -133,5 +142,11 @@ export class Dispatcher {
 export class ValidationError extends Error {
   constructor(public readonly errors: { field: string; constraints: string[] }[]) {
     super('Validation failed');
+  }
+}
+
+export class BadRequestError extends Error {
+  constructor(message: string) {
+    super(message);
   }
 }

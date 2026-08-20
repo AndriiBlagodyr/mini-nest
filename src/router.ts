@@ -2,6 +2,7 @@ import 'reflect-metadata';
 
 import { Container, type Token } from './container.js';
 import { getControllerPrefix } from './decorators/controller.js';
+import { isInjectable } from './decorators/injectable.js';
 import { getRoutes, type HttpMethod, type RouteMetadata } from './decorators/methods.js';
 import { getParamsMetadata, type ParamMetadata } from './decorators/params.js';
 
@@ -23,6 +24,10 @@ export class Router {
     const prefix = getControllerPrefix(controller);
     if (prefix === undefined) {
       throw new Error(`${controller.name} is not marked with @Controller()`);
+    }
+
+    if (!isInjectable(controller)) {
+      throw new Error(`${controller.name} is not marked as @Injectable()`);
     }
 
     const routesMeta: RouteMetadata[] = getRoutes(controller);
@@ -51,6 +56,15 @@ export class Router {
         paramsMetadata,
       });
     }
+
+    this.sortRoutes();
+  }
+
+  private sortRoutes(): void {
+    this.routes.sort((a, b) => {
+      if (a.method !== b.method) return 0;
+      return a.paramNames.length - b.paramNames.length;
+    });
   }
 
   match(method: string, pathname: string): { route: ResolvedRoute; params: Record<string, string> } | null {
