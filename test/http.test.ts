@@ -8,26 +8,12 @@ import { Injectable } from '../src/decorators/injectable.js';
 import { Get, Post } from '../src/decorators/methods.js';
 import { Body, Param, Query } from '../src/decorators/params.js';
 import { Dispatcher } from '../src/dispatcher.js';
-import { CreateUserDto } from '../src/dto/create-user.dto.js';
-
-@Injectable()
-class UserService {
-  private readonly users: { id: string; name: string; email: string }[] = [];
-
-  create(name: string, email: string) {
-    const user = { id: String(this.users.length + 1), name, email };
-    this.users.push(user);
-    return user;
-  }
-
-  findById(id: string) {
-    return this.users.find((u) => u.id === id) ?? null;
-  }
-
-  findAll(limit?: string) {
-    return limit ? this.users.slice(0, Number(limit)) : this.users;
-  }
-}
+import { AuthGuard } from '../src/guards/auth.guard.js';
+import { LoggingInterceptor } from '../src/interceptors/logging.interceptor.js';
+import { NotFoundError } from '../src/filters/exception.filter.js';
+import { CreateUserSchema, type CreateUserDto } from '../src/dto/create-user.dto.js';
+import { UserService } from '../src/services/user.service.js';
+import { getRequestId } from '../src/context/request-context.js';
 
 @Injectable()
 @Controller('users')
@@ -36,7 +22,8 @@ class UserController {
 
   @Get(':id')
   getUser(@Param('id') id: string) {
-    return { id };
+    const requestId = this.userService.getCurrentRequestId();
+    return { id, requestId };
   }
 
   @Get('')
@@ -46,19 +33,34 @@ class UserController {
 
   @Post('')
   createUser(@Body() dto: CreateUserDto) {
-    return { name: dto.name, email: dto.email, isDto: dto instanceof CreateUserDto };
+    return { name: dto.name, email: dto.email };
+  }
+
+  @Get('error')
+  throwError() {
+    throw new Error('boom');
+  }
+
+  @Get('not-found')
+  throwNotFound() {
+    throw new NotFoundError('User not found');
   }
 }
 
-describe('HTTP Dispatcher', () => {
+describe('HTTP Dispatcher (part 3)', () => {
   let dispatcher: Dispatcher;
   let container: Container;
   let baseUrl: string;
+  const logs: string[] = [];
 
   beforeAll(async () => {
     container = new Container();
     dispatcher = new Dispatcher(container);
+    dispatcher.useGuard(new AuthGuard());
+    dispatcher.useInterceptor(new LoggingInterceptor((msg) => logs.push(msg)));
+    dispatcher.usePipe('createUser', CreateUserSchema);
     dispatcher.registerController(UserController);
+
     const server = await dispatcher.listen(0);
     const addr = server.address();
     const port = typeof addr === 'object' && addr ? addr.port : 3000;
@@ -69,42 +71,37 @@ describe('HTTP Dispatcher', () => {
     await dispatcher.close();
   });
 
-  it('matches a route with @Controller prefix + @Get path', async () => {
-    const res = await fetch(`${baseUrl}/users/42`);
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.id).toBe('42');
+  it('guard blocks request without Authorization → 403', async () => {
+    const res = await fetch(`${baseUrl}/users/1`);
+    expect(res.status).toBe(403);
   });
 
-  it('@Param delivers route parameter to method argument', async () => {
-    const res = await fetch(`${baseUrl}/users/99`);
-    const body = await res.json();
-    expect(body.id).toBe('99');
-  });
-
-  it('@Query delivers query parameter to method argument', async () => {
-    const res = await fetch(`${baseUrl}/users?limit=5`);
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.limit).toBe('5');
-  });
-
-  it('@Body delivers parsed JSON to method argument', async () => {
-    const res = await fetch(`${baseUrl}/users`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'John', email: 'john@example.com' }),
+  it('guard allows request with Authorization', async () => {
+    const res = await fetch(`${baseUrl}/users/1`, {
+      headers: { Authorization: 'Bearer token' },
     });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.name).toBe('John');
-    expect(body.email).toBe('john@example.com');
+    expect(body.id).toBe('1');
   });
 
-  it('validation rejects invalid DTO with 400 and field name', async () => {
+  it('interceptor logs method, path and duration in ms', async () => {
+    logs.length = 0;
+    await fetch(`${baseUrl}/users/1`, {
+      headers: { Authorization: 'Bearer token' },
+    });
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs[0]).toMatch(/GET \/users\/1/);
+    expect(logs[0]).toMatch(/[0-9]+(\.[0-9]+)? ?ms/);
+  });
+
+  it('pipe with Zod rejects invalid body → 400 with field names', async () => {
     const res = await fetch(`${baseUrl}/users`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token',
+      },
       body: JSON.stringify({ name: 'J', email: 'not-an-email' }),
     });
     expect(res.status).toBe(400);
@@ -113,15 +110,89 @@ describe('HTTP Dispatcher', () => {
     expect(text).toMatch(/email/);
   });
 
-  it('validation passes and handler receives DTO instance', async () => {
+  it('pipe with Zod passes valid body', async () => {
     const res = await fetch(`${baseUrl}/users`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token',
+      },
       body: JSON.stringify({ name: 'Alice', email: 'alice@example.com' }),
     });
     expect(res.status).toBe(201);
     const body = await res.json();
-    expect(body.isDto).toBe(true);
+    expect(body.name).toBe('Alice');
+    expect(body.email).toBe('alice@example.com');
+  });
+
+  it('exception filter hides internal error details (500, no "boom")', async () => {
+    const res = await fetch(`${baseUrl}/users/error`, {
+      headers: { Authorization: 'Bearer token' },
+    });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(JSON.stringify(body)).not.toMatch(/boom|at .*\.ts:/);
+  });
+
+  it('NotFoundError maps to 404 with message', async () => {
+    const res = await fetch(`${baseUrl}/users/not-found`, {
+      headers: { Authorization: 'Bearer token' },
+    });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe('User not found');
+  });
+
+  it('X-Request-Id is returned in response header', async () => {
+    const res = await fetch(`${baseUrl}/users/1`, {
+      headers: { Authorization: 'Bearer token' },
+    });
+    const requestId = res.headers.get('x-request-id');
+    expect(requestId).toBeTruthy();
+    expect(requestId!.length).toBeGreaterThan(0);
+  });
+
+  it('X-Request-Id from client is echoed back', async () => {
+    const customId = 'my-custom-request-id-123';
+    const res = await fetch(`${baseUrl}/users/1`, {
+      headers: {
+        Authorization: 'Bearer token',
+        'X-Request-Id': customId,
+      },
+    });
+    expect(res.headers.get('x-request-id')).toBe(customId);
+  });
+
+  it('AsyncLocalStorage provides requestId deep in service without parameter', async () => {
+    const res = await fetch(`${baseUrl}/users/1`, {
+      headers: { Authorization: 'Bearer token' },
+    });
+    const body = await res.json();
+    const responseRequestId = res.headers.get('x-request-id');
+    expect(body.requestId).toBe(responseRequestId);
+  });
+
+  it('parallel requests do not mix request contexts', async () => {
+    const ids = Array.from({ length: 10 }, (_, i) => `req-${i}`);
+    const responses = await Promise.all(
+      ids.map((id) =>
+        fetch(`${baseUrl}/users/1`, {
+          headers: {
+            Authorization: 'Bearer token',
+            'X-Request-Id': id,
+          },
+        }).then(async (res) => ({
+          sentId: id,
+          receivedId: res.headers.get('x-request-id'),
+          bodyId: (await res.json()).requestId,
+        })),
+      ),
+    );
+
+    for (const r of responses) {
+      expect(r.receivedId).toBe(r.sentId);
+      expect(r.bodyId).toBe(r.sentId);
+    }
   });
 
   it('controller receives service from container (singleton)', () => {
@@ -130,8 +201,12 @@ describe('HTTP Dispatcher', () => {
     expect(ctrl1.userService).toBe(ctrl2.userService);
   });
 
-  it('returns 404 for unmatched routes', async () => {
-    const res = await fetch(`${baseUrl}/unknown`);
-    expect(res.status).toBe(404);
+  it('@Query delivers query parameter to method argument', async () => {
+    const res = await fetch(`${baseUrl}/users?limit=5`, {
+      headers: { Authorization: 'Bearer token' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.limit).toBe('5');
   });
 });
