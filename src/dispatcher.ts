@@ -5,7 +5,7 @@ import { URL } from 'node:url';
 import { Container } from './container.js';
 import { requestContext, createRequestStore } from './context/request-context.js';
 import { type ResolvedRoute, Router } from './router.js';
-import { handleException, ForbiddenError, BadRequestError } from './filters/exception.filter.js';
+import { handleException, ForbiddenError, BadRequestError, NotFoundError } from './filters/exception.filter.js';
 import type { Guard } from './guards/auth.guard.js';
 import type { Interceptor } from './interceptors/logging.interceptor.js';
 import type { ZodSchema } from './pipes/zod-validation.pipe.js';
@@ -105,9 +105,7 @@ export class Dispatcher {
 
       const matched = this.router.match(method, pathname);
       if (!matched) {
-        res.writeHead(404, { 'Content-Type': 'application/json', 'X-Request-Id': requestId });
-        res.end(JSON.stringify({ error: 'Not Found' }));
-        return;
+        throw new NotFoundError();
       }
 
       const { route, params } = matched;
@@ -129,32 +127,31 @@ export class Dispatcher {
         await interceptor.before(req);
       }
 
-      // Parse body
-      const body = method === 'POST' || method === 'PUT' || method === 'PATCH'
-        ? await this.parseBody(req)
-        : undefined;
+      let result: unknown;
+      try {
+        const body = method === 'POST' || method === 'PUT' || method === 'PATCH'
+          ? await this.parseBody(req)
+          : undefined;
 
-      // Pipe (Zod validation)
-      this.hooks.onPipe?.();
-      const args = this.buildArgs(route, params, query, body);
+        this.hooks.onPipe?.();
+        const args = this.buildArgs(route, params, query, body);
 
-      // Handler
-      this.hooks.onHandler?.();
-      const controllerInstance = this.container.resolve(
-        route.controllerToken as new (...args: never[]) => Record<string, (...a: unknown[]) => unknown>,
-      );
-      const result = await controllerInstance[route.handlerName](...args);
+        this.hooks.onHandler?.();
+        const controllerInstance = this.container.resolve(
+          route.controllerToken as new (...args: never[]) => Record<string, (...a: unknown[]) => unknown>,
+        );
+        result = await controllerInstance[route.handlerName](...args);
 
-      // Interceptor: after
-      this.hooks.onInterceptorAfter?.();
-      const durationMs = performance.now() - startTime;
-      for (const interceptor of this.interceptors) {
-        await interceptor.after(req, result, durationMs);
+        const statusCode = method === 'POST' ? 201 : 200;
+        res.writeHead(statusCode, { 'Content-Type': 'application/json', 'X-Request-Id': requestId });
+        res.end(JSON.stringify(result));
+      } finally {
+        this.hooks.onInterceptorAfter?.();
+        const durationMs = performance.now() - startTime;
+        for (const interceptor of this.interceptors) {
+          await interceptor.after(req, result, durationMs);
+        }
       }
-
-      const statusCode = method === 'POST' ? 201 : 200;
-      res.writeHead(statusCode, { 'Content-Type': 'application/json', 'X-Request-Id': requestId });
-      res.end(JSON.stringify(result));
     } catch (err: unknown) {
       res.setHeader('X-Request-Id', requestId);
       handleException(err, res);

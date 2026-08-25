@@ -126,12 +126,14 @@ describe('HTTP Dispatcher (part 3)', () => {
   });
 
   it('exception filter hides internal error details (500, no "boom")', async () => {
+    logs.length = 0;
     const res = await fetch(`${baseUrl}/users/error`, {
       headers: { Authorization: 'Bearer token' },
     });
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(JSON.stringify(body)).not.toMatch(/boom|at .*\.ts:/);
+    expect(logs.some((line) => /[0-9]+(\.[0-9]+)? ?ms/.test(line))).toBe(true);
   });
 
   it('NotFoundError maps to 404 with message', async () => {
